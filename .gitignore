@@ -1,0 +1,6 @@
+# Ignore secrets files
+hazformat-56ea389dba51.json
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+*.pyo
