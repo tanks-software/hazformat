@@ -41,7 +41,18 @@ class GoogleDriveSheets:
         values = result.get('values', [])
         if not values:
             return pd.DataFrame()
-        df = pd.DataFrame(values[1:], columns=values[0])
+        
+        # Fix uneven row length by padding shorter rows with empty strings
+        header = values[0]
+        data_rows = values[1:]
+        max_cols = len(header)
+        padded_rows = []
+        for row in data_rows:
+            if len(row) < max_cols:
+                row += [""] * (max_cols - len(row))
+            padded_rows.append(row)
+        
+        df = pd.DataFrame(padded_rows, columns=header)
         return df
 
     def list_folder_files(self, folder_id, mime_types=None):
@@ -79,7 +90,7 @@ class GoogleDriveSheets:
         tmp.close()
         return tmp.name
 
-# ----------------- Helper Functions ------------------
+# ----------------- Helper functions ------------------
 
 def convert_keys_to_template_style(orig_dict):
     key_map = {
@@ -91,7 +102,7 @@ def convert_keys_to_template_style(orig_dict):
         "ems": "EMS",
         "flashPoint": "FLASH_POINT",
         "marinePollutant": "MARINE_POLLUTANT",
-        "Limited Quantity ": "LIMITED_QUANTITY",  # note space in key
+        "Limited Quantity ": "LIMITED_QUANTITY",  # note space
         "natureOfCargo": "NATURE_OF_CARGO",
         "MFAG Number": "MFAG_NUMBER"
     }
@@ -175,7 +186,7 @@ def load_templates_from_drive(service_account_info, templates_folder_id):
 # ----------------- Main App ------------------
 
 def main():
-    # Load service account JSON from Streamlit secrets
+    # Load service account JSON from Streamlit secrets (as a string)
     service_account_json_str = st.secrets["google"]["service_account_json"]
     service_account_info = json.loads(service_account_json_str)
 
@@ -322,22 +333,18 @@ def main():
                 tmp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
                 doc.save(tmp_docx.name)
                 st.success("Document generated successfully!")
-                with open(tmp_docx.name, "rb") as f:
-                    doc_data = f.read()
                 st.download_button(
                     "Download Filled Word Document",
-                    data=doc_data,
+                    data=open(tmp_docx.name, "rb").read(),
                     file_name=f"{selected_template_name}_filled.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
             elif selected_template_path.lower().endswith((".xlsx", ".xls", ".xltx")):
                 filled_xlsx_path = fill_excel_template(selected_template_path, data)
                 st.success("Excel document generated successfully!")
-                with open(filled_xlsx_path, "rb") as f:
-                    excel_data = f.read()
                 st.download_button(
                     "Download Filled Excel Document",
-                    data=excel_data,
+                    data=open(filled_xlsx_path, "rb").read(),
                     file_name=f"{selected_template_name}_filled.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
