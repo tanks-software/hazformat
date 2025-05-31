@@ -41,19 +41,25 @@ class GoogleDriveSheets:
         values = result.get('values', [])
         if not values:
             return pd.DataFrame()
-        
-        # Fix uneven row length by padding shorter rows with empty strings
-        header = values[0]
-        data_rows = values[1:]
-        max_cols = len(header)
-        padded_rows = []
-        for row in data_rows:
-            if len(row) < max_cols:
-                row += [""] * (max_cols - len(row))
-            padded_rows.append(row)
-        
-        df = pd.DataFrame(padded_rows, columns=header)
+
+        if sheet_name == "Equipment Type":
+            # Equipment Type sheet has no header, treat all rows as data in one column
+            df = pd.DataFrame(values, columns=["Equipment Type"])
+        else:
+            # Normal sheets with header row
+            header = values[0]
+            data_rows = values[1:]
+            max_cols = len(header)
+            padded_rows = []
+            for row in data_rows:
+                if len(row) < max_cols:
+                    row += [""] * (max_cols - len(row))
+                elif len(row) > max_cols:
+                    row = row[:max_cols]
+                padded_rows.append(row)
+            df = pd.DataFrame(padded_rows, columns=header)
         return df
+
 
     def list_folder_files(self, folder_id, mime_types=None):
         query = f"'{folder_id}' in parents and trashed = false"
