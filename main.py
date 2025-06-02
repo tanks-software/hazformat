@@ -11,12 +11,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import io
 import os
+import time
 
 # ----------------- Google API Helper ------------------
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/spreadsheets.readonly"
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
 
 class GoogleDriveSheets:
@@ -33,29 +34,48 @@ class GoogleDriveSheets:
         self.sheets_service = build('sheets', 'v4', credentials=self.creds)
 
     def download_spreadsheet_as_df(self, spreadsheet_id, sheet_name):
-        result = self.sheets_service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=sheet_name
-        ).execute()
-        values = result.get('values', [])
-        if not values:
+        try:
+            result = self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=sheet_name
+            ).execute()
+            values = result.get('values', [])
+            if not values:
+                return pd.DataFrame()
+
+            if sheet_name == "Equipment Type":
+                df = pd.DataFrame(values, columns=["Equipment Type"])
+            else:
+                header = values[0]
+                data_rows = values[1:]
+                max_cols = len(header)
+                padded_rows = []
+                for row in data_rows:
+                    if len(row) < max_cols:
+                        row += [""] * (max_cols - len(row))
+                    elif len(row) > max_cols:
+                        row = row[:max_cols]
+                    padded_rows.append(row)
+                df = pd.DataFrame(padded_rows, columns=header)
+            #st.write(f"Debug: Fetched {len(df)} rows from sheet '{sheet_name}'")
+            return df
+        except Exception as e:
+            st.error(f"Error fetching data from sheet '{sheet_name}': {str(e)}")
             return pd.DataFrame()
 
-        if sheet_name == "Equipment Type":
-            df = pd.DataFrame(values, columns=["Equipment Type"])
-        else:
-            header = values[0]
-            data_rows = values[1:]
-            max_cols = len(header)
-            padded_rows = []
-            for row in data_rows:
-                if len(row) < max_cols:
-                    row += [""] * (max_cols - len(row))
-                elif len(row) > max_cols:
-                    row = row[:max_cols]
-                padded_rows.append(row)
-            df = pd.DataFrame(padded_rows, columns=header)
-        return df
+    def append_to_sheet(self, spreadsheet_id, sheet_name, values):
+        try:
+            body = {'values': [values]}
+            result = self.sheets_service.spreadsheets().values().append(
+                spreadsheetId=spreadsheet_id,
+                range=sheet_name,
+                valueInputOption="RAW",
+                body=body
+            ).execute()
+            return result
+        except Exception as e:
+            st.error(f"Error appending to sheet '{sheet_name}': {str(e)}")
+            return None
 
     def list_folder_files(self, folder_id, mime_types=None):
         query = f"'{folder_id}' in parents and trashed = false"
@@ -136,8 +156,8 @@ def fill_excel_template(template_path, data):
 
 # ----------------- Load Master Data ------------------
 
-@st.cache_data(ttl=3600)
-def load_master_data_from_drive(service_account_info, spreadsheet_id):
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_master_data_from_drive(service_account_info, spreadsheet_id, _cache_buster):
     gds = GoogleDriveSheets(service_account_info)
     cargo_df = gds.download_spreadsheet_as_df(spreadsheet_id, "cargo")
     equipment_df = gds.download_spreadsheet_as_df(spreadsheet_id, "Equipment Type")
@@ -169,11 +189,12 @@ def load_master_data_from_drive(service_account_info, spreadsheet_id):
 
     vessels = vessels_df["Vessel_Name"].dropna().tolist() if not vessels_df.empty else []
 
+    #st.write(f"Debug: Shippers list: {shippers}")
     return cargo_data, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels
 
 # ----------------- Load Templates ------------------
 
-@st.cache_resource(ttl=3600)
+@st.cache_resource(ttl=3600, show_spinner=False)
 def load_templates_from_drive(service_account_info, templates_folder_id):
     gds = GoogleDriveSheets(service_account_info)
     files = gds.list_folder_files(templates_folder_id, mime_types=[
@@ -196,13 +217,29 @@ def main():
     TEMPLATES_FOLDER_ID = "1cYa1GvGGtKxP1TPD-ACzA281LpxWZNmy"
     MASTER_SPREADSHEET_ID = "1Hj0XV7Pe4oC7Mu7_x7jNvuJzOmDT5qZtlhqSytcdDno"
 
-    cargo_data_raw, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels = load_master_data_from_drive(service_account_info, MASTER_SPREADSHEET_ID)
+    # Initialize session state for cache busting and form visibility
+    if 'cache_buster' not in st.session_state:
+        st.session_state.cache_buster = int(time.time())
+    if 'show_shipper_form' not in st.session_state:
+        st.session_state.show_shipper_form = False
+    if 'show_consignee_form' not in st.session_state:
+        st.session_state.show_consignee_form = False
+    if 'show_pod_form' not in st.session_state:
+        st.session_state.show_pod_form = False
+    if 'show_vessel_form' not in st.session_state:
+        st.session_state.show_vessel_form = False
+
+    # Load master data
+    cargo_data_raw, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels = load_master_data_from_drive(
+        service_account_info, MASTER_SPREADSHEET_ID, st.session_state.cache_buster
+    )
     cargo_data = {k: convert_keys_to_template_style(v) for k, v in cargo_data_raw.items()}
 
     templates = load_templates_from_drive(service_account_info, TEMPLATES_FOLDER_ID)
 
     st.title("Hazardous DG Form Generator")
 
+    # Template selection
     template_options = ["Select a Template"] + list(templates.keys())
     selected_template_name = st.selectbox("Select Template", template_options)
 
@@ -212,6 +249,8 @@ def main():
     else:
         selected_template_path = templates[selected_template_name]
 
+    # Form inputs
+    st.subheader("Cargo Information")
     cargo = st.selectbox("Select Proper Shipping Name", list(cargo_data.keys()))
     if cargo and cargo in cargo_data:
         details = cargo_data[cargo]
@@ -248,7 +287,41 @@ def main():
 
     mfag_number = st.text_input("MFAG Number", details.get("MFAG_NUMBER", ""))
 
-    shipper = st.selectbox("Shipper", shippers)
+    # Shipper selection with "Add a Shipper" at the top, second option as default
+    st.subheader("Shipper Details")
+    shipper_options = ["Add a Shipper"] + shippers
+    default_shipper_index = 1 if len(shipper_options) > 1 else 0
+    shipper = st.selectbox("Shipper", shipper_options, index=default_shipper_index, key=f"shipper_select_{st.session_state.cache_buster}")
+    
+    if shipper == "Add a Shipper":
+        st.session_state.show_shipper_form = True
+    elif shipper in shippers:
+        st.session_state.show_shipper_form = False
+
+    # Form for adding new Shipper
+    if st.session_state.show_shipper_form:
+        with st.expander("Add New Shipper", expanded=True):
+            new_shipper = st.text_input("New Shipper Name", key="new_shipper")
+            new_shipper_contact = st.text_input("New Shipper Contact Name", key="new_shipper_contact")
+            new_shipper_number = st.text_input("New Shipper Contact Number", key="new_shipper_number")
+            new_shipper_address = st.text_area("New Shipper Address", key="new_shipper_address")
+            if st.button("Add Shipper"):
+                if new_shipper.strip():
+                    gds = GoogleDriveSheets(service_account_info)
+                    values = [new_shipper.strip(), new_shipper_contact.strip(), new_shipper_number.strip(), new_shipper_address.strip()]
+                    result = gds.append_to_sheet(MASTER_SPREADSHEET_ID, "Shippers", values)
+                    if result:
+                        load_master_data_from_drive.clear()
+                        st.session_state.cache_buster = int(time.time())
+                        st.session_state.show_shipper_form = False
+                        st.success(f"Shipper '{new_shipper}' added successfully!")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("Failed to add shipper. Please try again.")
+                else:
+                    st.error("Shipper name is required.")
+
     if shipper and shipper in shipper_contacts:
         contact_name = shipper_contacts[shipper]["ContactName"]
         contact_number = shipper_contacts[shipper]["ContactNumber"]
@@ -263,7 +336,39 @@ def main():
     shipper_contact_number = st.text_input("Shipper Contact Number", contact_number)
     shipper_address_text = st.text_area("Shipper Address", formatted_shipper_address)
 
-    consignee = st.selectbox("Consignee", consignees)
+    # Consignee selection with "Add a Consignee" at the top, second option as default
+    st.subheader("Consignee Details")
+    consignee_options = ["Add a Consignee"] + consignees
+    default_consignee_index = 1 if len(consignee_options) > 1 else 0
+    consignee = st.selectbox("Consignee", consignee_options, index=default_consignee_index, key=f"consignee_select_{st.session_state.cache_buster}")
+    
+    if consignee == "Add a Consignee":
+        st.session_state.show_consignee_form = True
+    elif consignee in consignees:
+        st.session_state.show_consignee_form = False
+
+    # Form for adding new Consignee
+    if st.session_state.show_consignee_form:
+        with st.expander("Add New Consignee", expanded=True):
+            new_consignee = st.text_input("New Consignee Name", key="new_consignee")
+            new_consignee_address = st.text_area("New Consignee Address", key="new_consignee_address")
+            if st.button("Add Consignee"):
+                if new_consignee.strip():
+                    gds = GoogleDriveSheets(service_account_info)
+                    values = [new_consignee.strip(), new_consignee_address.strip()]
+                    result = gds.append_to_sheet(MASTER_SPREADSHEET_ID, "Consignees", values)
+                    if result:
+                        load_master_data_from_drive.clear()
+                        st.session_state.cache_buster = int(time.time())
+                        st.session_state.show_consignee_form = False
+                        st.success(f"Consignee '{new_consignee}' added successfully!")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("Failed to add consignee. Please try again.")
+                else:
+                    st.error("Consignee name is required.")
+
     if consignee and consignee in consignee_addresses:
         consignee_address = consignee_addresses[consignee]
     else:
@@ -272,17 +377,83 @@ def main():
     formatted_consignee_address = format_address_by_chars(consignee_address, width=40)
     consignee_address_text = st.text_area("Consignee Address", formatted_consignee_address)
 
-    pol = st.selectbox("Port of Loading (POL)", pol_ports)
-    pod = st.selectbox("Port of Discharge (POD)", pod_ports)
-    vessel = st.selectbox("Vessel", vessels)
+    # Port of Loading (POL) without "Add a POL"
+    st.subheader("Port Details")
+    pol = st.selectbox("Port of Loading (POL)", pol_ports, key=f"pol_select_{st.session_state.cache_buster}")
 
+    # Port of Discharge (POD) with "Add a POD" at the top, second option as default
+    pod_options = ["Add a POD"] + pod_ports
+    default_pod_index = 1 if len(pod_options) > 1 else 0
+    pod = st.selectbox("Port of Discharge (POD)", pod_options, index=default_pod_index, key=f"pod_select_{st.session_state.cache_buster}")
+    
+    if pod == "Add a POD":
+        st.session_state.show_pod_form = True
+    elif pod in pod_ports:
+        st.session_state.show_pod_form = False
+
+    # Form for adding new POD
+    if st.session_state.show_pod_form:
+        with st.expander("Add New POD", expanded=True):
+            new_pod = st.text_input("New Port of Discharge (POD)", key="new_pod")
+            if st.button("Add POD"):
+                if new_pod.strip():
+                    gds = GoogleDriveSheets(service_account_info)
+                    values = ["", new_pod.strip()]
+                    result = gds.append_to_sheet(MASTER_SPREADSHEET_ID, "Ports", values)
+                    if result:
+                        load_master_data_from_drive.clear()
+                        st.session_state.cache_buster = int(time.time())
+                        st.session_state.show_pod_form = False
+                        st.success(f"POD '{new_pod}' added successfully!")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("Failed to add POD. Please try again.")
+                else:
+                    st.error("POD name is required.")
+
+    # Vessel with "Add a Vessel" at the top, second option as default
+    vessel_options = ["Add a Vessel"] + vessels
+    default_vessel_index = 1 if len(vessel_options) > 1 else 0
+    vessel = st.selectbox("Vessel", vessel_options, index=default_vessel_index, key=f"vessel_select_{st.session_state.cache_buster}")
+    
+    if vessel == "Add a Vessel":
+        st.session_state.show_vessel_form = True
+    elif vessel in vessels:
+        st.session_state.show_vessel_form = False
+
+    # Form for adding new Vessel
+    if st.session_state.show_vessel_form:
+        with st.expander("Add New Vessel", expanded=True):
+            new_vessel = st.text_input("New Vessel Name", key="new_vessel")
+            if st.button("Add Vessel"):
+                if new_vessel.strip():
+                    gds = GoogleDriveSheets(service_account_info)
+                    values = [new_vessel.strip()]
+                    result = gds.append_to_sheet(MASTER_SPREADSHEET_ID, "Vessels", values)
+                    if result:
+                        load_master_data_from_drive.clear()
+                        st.session_state.cache_buster = int(time.time())
+                        st.session_state.show_vessel_form = False
+                        st.success(f"Vessel '{new_vessel}' added successfully!")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("Failed to add vessel. Please try again.")
+                else:
+                    st.error("Vessel name is required.")
+
+    # Equipment Type (no "Add a Equipment Type" option)
+    st.subheader("Cargo Details")
     qty = st.number_input("Quantity", min_value=1, step=1, value=1)
-    equipment_type = st.selectbox("Equipment Type *", equipment_types)
+    equipment_type = st.selectbox("Equipment Type *", equipment_types, key=f"equipment_select_{st.session_state.cache_buster}")
 
     outer_package = st.text_input("Outer Package *")
     inner_package = st.text_input("Inner Package *")
     gross_wt = st.text_input("Gross Weight *")
     net_wt = st.text_input("Net Weight *")
+    container_number = st.text_input("Container Number (Optional)")
+    seal_number = st.text_input("Seal Number (Optional)")
 
     mandatory_fields_filled = all([
         outer_package.strip(),
@@ -299,15 +470,15 @@ def main():
             st.error("Please fill all mandatory fields marked with * and select Equipment Type")
         else:
             data = {
-                "SHIPPER": shipper,
+                "SHIPPER": shipper if shipper != "Add a Shipper" else "",
                 "SHIPPER_CONTACT_NAME": shipper_contact_name,
                 "SHIPPER_CONTACT_NUMBER": shipper_contact_number,
                 "SHIPPER_ADDRESS": shipper_address_text,
-                "CONSIGNEE": consignee,
+                "CONSIGNEE": consignee if consignee != "Add a Consignee" else "",
                 "CONSIGNEE_ADDRESS": consignee_address_text,
                 "POL": pol,
-                "POD": pod,
-                "VESSEL": vessel,
+                "POD": pod if pod != "Add a POD" else "",
+                "VESSEL": vessel if vessel != "Add a Vessel" else "",
                 "CARGO": cargo,
                 "TECHNICAL_NAME": technical_name,
                 "CLASS": cargo_class,
@@ -326,7 +497,9 @@ def main():
                 "NET_WT": net_wt,
                 "EQUIPMENT_TYPE": equipment_type,
                 "QTY_EQUIPMENT": combined_qty_equipment,
-                "QUANTITY": qty
+                "QUANTITY": qty,
+                "CONTAINER_NUMBER": container_number,
+                "SEAL_NUMBER": seal_number
             }
 
             if selected_template_path.lower().endswith(".docx"):
