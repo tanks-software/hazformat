@@ -41,10 +41,38 @@ class GoogleDriveSheets:
             ).execute()
             values = result.get('values', [])
             if not values:
+                st.warning(f"Sheet '{sheet_name}' is empty.")
                 return pd.DataFrame()
 
-            if sheet_name == "Equipment Type":
-                df = pd.DataFrame(values, columns=["Equipment Type"])
+            # Define expected headers for specific sheets
+            expected_headers = {
+                "Shippers": ["Shipper", "ContactName", "ContactNumber", "Shipper_Address"],
+                "Consignees": ["Consignee", "Consignee_Address"],
+                "Ports": ["POL", "POD"],
+                "Vessels": ["Vessel_Name"],
+                "Equipment Type": ["Equipment Type"],
+                "cargo": ["Proper Shipping Name", "technicalName", "class", "unno", "subrisk", "packingGroup", "ems", "flashPoint", "marinePollutant", "Limited Quantity ", "natureOfCargo", "MFAG Number"]
+            }
+
+            # If the first row doesn't match expected headers, treat it as data and assign default headers
+            if sheet_name in expected_headers:
+                first_row = values[0]
+                if not all(header in first_row for header in expected_headers[sheet_name][:len(first_row)]):
+                    st.warning(f"Sheet '{sheet_name}' does not have expected headers {expected_headers[sheet_name]}. Using default headers and treating first row as data.")
+                    data_rows = values  # Treat the first row as data
+                    df = pd.DataFrame(data_rows, columns=expected_headers[sheet_name][:len(first_row)])
+                else:
+                    header = values[0]
+                    data_rows = values[1:]
+                    max_cols = len(header)
+                    padded_rows = []
+                    for row in data_rows:
+                        if len(row) < max_cols:
+                            row += [""] * (max_cols - len(row))
+                        elif len(row) > max_cols:
+                            row = row[:max_cols]
+                        padded_rows.append(row)
+                    df = pd.DataFrame(padded_rows, columns=header)
             else:
                 header = values[0]
                 data_rows = values[1:]
@@ -57,7 +85,8 @@ class GoogleDriveSheets:
                         row = row[:max_cols]
                     padded_rows.append(row)
                 df = pd.DataFrame(padded_rows, columns=header)
-            #st.write(f"Debug: Fetched {len(df)} rows from sheet '{sheet_name}'")
+
+            #st.write(f"Debug: Fetched {len(df)} rows from sheet '{sheet_name}' with columns {df.columns.tolist()}")
             return df
         except Exception as e:
             st.error(f"Error fetching data from sheet '{sheet_name}': {str(e)}")
@@ -75,6 +104,26 @@ class GoogleDriveSheets:
             return result
         except Exception as e:
             st.error(f"Error appending to sheet '{sheet_name}': {str(e)}")
+            return None
+
+    def update_sheet_row(self, spreadsheet_id, sheet_name, row_index, values):
+        try:
+            # Prevent updating the header row (row 1)
+            if row_index < 1:
+                st.error(f"Cannot update row {row_index + 1} in sheet '{sheet_name}' as it would overwrite the header row.")
+                return None
+
+            range_name = f"{sheet_name}!A{row_index + 1}:{chr(65 + len(values) - 1)}{row_index + 1}"
+            body = {'values': [values]}
+            result = self.sheets_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
+                valueInputOption="RAW",
+                body=body
+            ).execute()
+            return result
+        except Exception as e:
+            st.error(f"Error updating row in sheet '{sheet_name}': {str(e)}")
             return None
 
     def list_folder_files(self, folder_id, mime_types=None):
@@ -178,19 +227,34 @@ def load_master_data_from_drive(service_account_info, spreadsheet_id, _cache_bus
         details = {k: ("" if pd.isna(v) else v) for k, v in details.items()}
         cargo_data[cargo_name] = details
 
-    equipment_types = equipment_df.iloc[:, 0].dropna().tolist()
-    shippers = shippers_df["Shipper"].dropna().tolist()
-    shipper_contacts = shippers_df.set_index("Shipper")[["ContactName", "ContactNumber", "Shipper_Address"]].to_dict(orient="index")
-    consignees = consignees_df["Consignee"].dropna().tolist()
-    consignee_addresses = consignees_df.set_index("Consignee")["Consignee_Address"].to_dict()
+    equipment_types = equipment_df.iloc[:, 0].dropna().tolist() if not equipment_df.empty else []
 
-    pol_ports = ports_df["POL"].dropna().tolist() if "POL" in ports_df.columns else []
-    pod_ports = ports_df["POD"].dropna().tolist() if "POD" in ports_df.columns else []
+    # Validate and extract shippers
+    expected_shipper_columns = ["Shipper", "ContactName", "ContactNumber", "Shipper_Address"]
+    if not shippers_df.empty:
+        shippers = shippers_df["Shipper"].dropna().tolist()
+        shipper_contacts = shippers_df.set_index("Shipper")[["ContactName", "ContactNumber", "Shipper_Address"]].to_dict(orient="index")
+    else:
+        st.error(f"Shippers sheet is empty or could not be loaded.")
+        shippers = []
+        shipper_contacts = {}
 
-    vessels = vessels_df["Vessel_Name"].dropna().tolist() if not vessels_df.empty else []
+    # Validate and extract consignees
+    expected_consignee_columns = ["Consignee", "Consignee_Address"]
+    if not consignees_df.empty:
+        consignees = consignees_df["Consignee"].dropna().tolist()
+        consignee_addresses = consignees_df.set_index("Consignee")["Consignee_Address"].to_dict()
+    else:
+        st.error(f"Consignees sheet is empty or could not be loaded.")
+        consignees = []
+        consignee_addresses = {}
 
-    #st.write(f"Debug: Shippers list: {shippers}")
-    return cargo_data, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels
+    pol_ports = ports_df["POL"].dropna().tolist() if not ports_df.empty and "POL" in ports_df.columns else []
+    pod_ports = ports_df["POD"].dropna().tolist() if not ports_df.empty and "POD" in ports_df.columns else []
+
+    vessels = vessels_df["Vessel_Name"].dropna().tolist() if not vessels_df.empty and "Vessel_Name" in vessels_df.columns else []
+
+    return cargo_data, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels, shippers_df, consignees_df
 
 # ----------------- Load Templates ------------------
 
@@ -230,7 +294,7 @@ def main():
         st.session_state.show_vessel_form = False
 
     # Load master data
-    cargo_data_raw, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels = load_master_data_from_drive(
+    cargo_data_raw, shippers, shipper_contacts, consignees, consignee_addresses, pol_ports, pod_ports, equipment_types, vessels, shippers_df, consignees_df = load_master_data_from_drive(
         service_account_info, MASTER_SPREADSHEET_ID, st.session_state.cache_buster
     )
     cargo_data = {k: convert_keys_to_template_style(v) for k, v in cargo_data_raw.items()}
@@ -251,8 +315,9 @@ def main():
 
     # Form inputs
     st.subheader("Cargo Information")
-    cargo = st.selectbox("Select Proper Shipping Name", list(cargo_data.keys()))
-    if cargo and cargo in cargo_data:
+    cargo_options = ["Select Proper Shipping Name"] + list(cargo_data.keys())
+    cargo = st.selectbox("Select Proper Shipping Name", cargo_options, index=0)
+    if cargo and cargo != "Select Proper Shipping Name" and cargo in cargo_data:
         details = cargo_data[cargo]
     else:
         details = {k: "" for k in [
@@ -263,7 +328,13 @@ def main():
     cargo_class = st.text_input("Class", details.get("CLASS", ""))
     unno = st.text_input("UNNO", details.get("UNNO", ""))
     subrisk = st.text_input("Subrisk", details.get("SUBRISK", ""))
-    packing_group = st.text_input("Packing Group", details.get("PACKING_GROUP", ""))
+    packing_group_options = ["I", "II", "III", "NOT APPLICABLE"]
+    packing_group_default = details.get("PACKING_GROUP", "").upper()
+    packing_group = st.selectbox(
+        "Packing Group",
+        packing_group_options,
+        index=packing_group_options.index(packing_group_default) if packing_group_default in packing_group_options else 3
+    )
     ems = st.text_input("EMS", details.get("EMS", ""))
     flash_point = st.text_input("Flash Point", details.get("FLASH_POINT", ""))
 
@@ -287,15 +358,16 @@ def main():
 
     mfag_number = st.text_input("MFAG Number", details.get("MFAG_NUMBER", ""))
 
-    # Shipper selection with "Add a Shipper" at the top, second option as default
+    # Shipper selection with placeholder
     st.subheader("Shipper Details")
-    shipper_options = ["Add a Shipper"] + shippers
-    default_shipper_index = 1 if len(shipper_options) > 1 else 0
-    shipper = st.selectbox("Shipper", shipper_options, index=default_shipper_index, key=f"shipper_select_{st.session_state.cache_buster}")
+    shipper_options = ["Select a Shipper", "Add a Shipper"] + shippers
+    shipper = st.selectbox("Shipper", shipper_options, index=0, key=f"shipper_select_{st.session_state.cache_buster}")
     
     if shipper == "Add a Shipper":
         st.session_state.show_shipper_form = True
     elif shipper in shippers:
+        st.session_state.show_shipper_form = False
+    else:
         st.session_state.show_shipper_form = False
 
     # Form for adding new Shipper
@@ -336,15 +408,38 @@ def main():
     shipper_contact_number = st.text_input("Shipper Contact Number", contact_number)
     shipper_address_text = st.text_area("Shipper Address", formatted_shipper_address)
 
-    # Consignee selection with "Add a Consignee" at the top, second option as default
+    # Update Shipper button
+    if shipper and shipper not in ["Select a Shipper", "Add a Shipper"]:
+        if st.button("Update Shipper"):
+            # Find the row index in the shippers_df
+            row_index = shippers_df.index[shippers_df["Shipper"] == shipper].tolist()
+            if row_index:
+                # Adjust row_index for Google Sheet (DataFrame index 0 = Sheet row 2 because of header)
+                row_index = row_index[0] + 1  # Add 1 to account for header row
+                gds = GoogleDriveSheets(service_account_info)
+                values = [shipper, shipper_contact_name.strip(), shipper_contact_number.strip(), shipper_address_text.strip()]
+                result = gds.update_sheet_row(MASTER_SPREADSHEET_ID, "Shippers", row_index, values)
+                if result:
+                    load_master_data_from_drive.clear()
+                    st.session_state.cache_buster = int(time.time())
+                    st.success(f"Shipper '{shipper}' updated successfully!")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Failed to update shipper. Please try again.")
+            else:
+                st.error("Shipper not found in master data.")
+
+    # Consignee selection with placeholder
     st.subheader("Consignee Details")
-    consignee_options = ["Add a Consignee"] + consignees
-    default_consignee_index = 1 if len(consignee_options) > 1 else 0
-    consignee = st.selectbox("Consignee", consignee_options, index=default_consignee_index, key=f"consignee_select_{st.session_state.cache_buster}")
+    consignee_options = ["Select a Consignee", "Add a Consignee"] + consignees
+    consignee = st.selectbox("Consignee", consignee_options, index=0, key=f"consignee_select_{st.session_state.cache_buster}")
     
     if consignee == "Add a Consignee":
         st.session_state.show_consignee_form = True
     elif consignee in consignees:
+        st.session_state.show_consignee_form = False
+    else:
         st.session_state.show_consignee_form = False
 
     # Form for adding new Consignee
@@ -376,6 +471,28 @@ def main():
 
     formatted_consignee_address = format_address_by_chars(consignee_address, width=40)
     consignee_address_text = st.text_area("Consignee Address", formatted_consignee_address)
+
+    # Update Consignee button
+    if consignee and consignee not in ["Select a Consignee", "Add a Consignee"]:
+        if st.button("Update Consignee"):
+            # Find the row index in the consignees_df
+            row_index = consignees_df.index[consignees_df["Consignee"] == consignee].tolist()
+            if row_index:
+                # Adjust row_index for Google Sheet (DataFrame index 0 = Sheet row 2 because of header)
+                row_index = row_index[0] + 1  # Add 1 to account for header row
+                gds = GoogleDriveSheets(service_account_info)
+                values = [consignee, consignee_address_text.strip()]
+                result = gds.update_sheet_row(MASTER_SPREADSHEET_ID, "Consignees", row_index, values)
+                if result:
+                    load_master_data_from_drive.clear()
+                    st.session_state.cache_buster = int(time.time())
+                    st.success(f"Consignee '{consignee}' updated successfully!")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Failed to update consignee. Please try again.")
+            else:
+                st.error("Consignee not found in master data.")
 
     # Port of Loading (POL) without "Add a POL"
     st.subheader("Port Details")
@@ -443,13 +560,16 @@ def main():
                 else:
                     st.error("Vessel name is required.")
 
+    # Voyage No field
+    voyage_no = st.text_input("Voyage No")
+
     # Equipment Type (no "Add a Equipment Type" option)
     st.subheader("Cargo Details")
     qty = st.number_input("Quantity", min_value=1, step=1, value=1)
     equipment_type = st.selectbox("Equipment Type *", equipment_types, key=f"equipment_select_{st.session_state.cache_buster}")
 
     outer_package = st.text_input("Outer Package *")
-    inner_package = st.text_input("Inner Package *")
+    inner_package = st.text_input("Inner Package (Optional)")
     gross_wt = st.text_input("Gross Weight *")
     net_wt = st.text_input("Net Weight *")
     container_number = st.text_input("Container Number (Optional)")
@@ -457,7 +577,6 @@ def main():
 
     mandatory_fields_filled = all([
         outer_package.strip(),
-        inner_package.strip(),
         gross_wt.strip(),
         net_wt.strip(),
         equipment_type != ""
@@ -468,17 +587,24 @@ def main():
     if st.button("Generate Document"):
         if not mandatory_fields_filled:
             st.error("Please fill all mandatory fields marked with * and select Equipment Type")
+        elif shipper == "Select a Shipper":
+            st.error("Please select a Shipper")
+        elif consignee == "Select a Consignee":
+            st.error("Please select a Consignee")
+        elif cargo == "Select Proper Shipping Name":
+            st.error("Please select a Proper Shipping Name")
         else:
             data = {
-                "SHIPPER": shipper if shipper != "Add a Shipper" else "",
+                "SHIPPER": shipper if shipper not in ["Select a Shipper", "Add a Shipper"] else "",
                 "SHIPPER_CONTACT_NAME": shipper_contact_name,
                 "SHIPPER_CONTACT_NUMBER": shipper_contact_number,
                 "SHIPPER_ADDRESS": shipper_address_text,
-                "CONSIGNEE": consignee if consignee != "Add a Consignee" else "",
+                "CONSIGNEE": consignee if consignee not in ["Select a Consignee", "Add a Consignee"] else "",
                 "CONSIGNEE_ADDRESS": consignee_address_text,
                 "POL": pol,
                 "POD": pod if pod != "Add a POD" else "",
                 "VESSEL": vessel if vessel != "Add a Vessel" else "",
+                "VOYAGE_NO": voyage_no,
                 "CARGO": cargo,
                 "TECHNICAL_NAME": technical_name,
                 "CLASS": cargo_class,
